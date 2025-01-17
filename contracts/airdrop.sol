@@ -7,7 +7,7 @@ import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-
+import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
 // MerkleDistributor for airdrop to BTFS staker
 contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
@@ -15,8 +15,6 @@ contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
 
     bytes32 public merkleRoot;
     bytes32 public pendingMerkleRoot;
-    uint256 public userMaxAmount;
-    uint256 public pendingUserMaxAmount;
     uint256 public increaseTotalAmount;
     uint256 public pendingIncreaseTotalAmount;
     uint256 public lastTime;
@@ -34,7 +32,7 @@ contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
     }
 
     statistics  public totalInfo;
-
+    // TODO: change the datastruct to a map
     struct claimedUser {
         bytes32 lastMerkleRoot;
         uint256 claimed;
@@ -42,7 +40,7 @@ contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
     mapping(address => claimedUser) private claimedUserMap;
     uint8 public claimAvailable;
 
-    event Claimed(bytes32 merkleRootInput, uint256 index, address account, uint256 amount);
+    event Claimed(bytes32 merkleRootInput, address account, uint256 amount);
     event SetTotalAmount(bytes32 merkleRoot, uint256 amount);
     event AddTotalAmount(bytes32 merkleRoot, uint256 increateAmount);
     event WithdrawAllBalance(address account, uint256 amount);
@@ -53,8 +51,13 @@ contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
         reviewAuthority = _reviewAuthority;
         superAuthority = _superAuthor;
         __Ownable_init();
+        __UUPSUpgradeable_init();
     }
 
+    function getImplementation() external view returns (address) {
+        return _getImplementation();
+    }
+    
     ///@dev required by the OZ UUPS module
     function _authorizeUpgrade(address) internal override onlyOwner {}
 
@@ -76,6 +79,7 @@ contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
     }
 
     // super authority withdraw all balance.
+    // TODO: 大额资金建议加上时间延迟函数
     function withdrawAllBalance() external {
         require(msg.sender == superAuthority, "withdrawAmount: you are not super authority.");
         payable(msg.sender).transfer(address(this).balance);
@@ -96,43 +100,39 @@ contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
     }
 
     // every day, the proposal authority calls to submit the merkle root for a new airdrop.
-    function proposeMerkleRoot(bytes32 _merkleRoot, uint256 _userMaxAmount, uint256 _increaseTotalAmount) public {
+    function proposeMerkleRoot(bytes32 _merkleRoot, uint256 _increaseTotalAmount) public {
         require(msg.sender == proposalAuthority, "proposeMerkleRoot: msg.sender != proposalAuthority");
         require(_merkleRoot != 0x00, "proposeMerkleRoot: _merkleRoot == 0x00");
         require(pendingMerkleRoot == 0x00, "proposeMerkleRoot: pendingMerkleRoot != 0x00");
         require(_merkleRoot != merkleRoot, "proposeMerkleRoot: merkleRoot is already used.");
         //require(block.timestamp >= lastRoot + 86400, "proposeMerkleRoot: it takes 1 day to modify it.");
-        pendingMerkleRoot = _merkleRoot;
-
-        require(_userMaxAmount > 0, "proposeMerkleRoot: _userMaxAmount <= 0");
-        require(_userMaxAmount >= userMaxAmount, "proposeMerkleRoot: userMaxAmount is less than old.");
-        pendingUserMaxAmount = _userMaxAmount;
-
         require(_increaseTotalAmount > 0, "proposeMerkleRoot: _increaseTotalAmount <= 0");
+
+        pendingMerkleRoot = _merkleRoot;
         pendingIncreaseTotalAmount = _increaseTotalAmount;
     }
 
     // After validating the correctness of the pending merkle root, the reviewing authority
     // calls to confirm it and the distribution may begin.
+    // 这个 reviewPendingMerkleRoot 只是为了多一道审核？那审核人具体能怎么审核呢？
     function reviewPendingMerkleRoot(bool _approved) public {
         require(msg.sender == reviewAuthority, "msg.sender != reviewAuthority");
         require(pendingMerkleRoot != 0x00, "pendingMerkleRoot != 0x00");
-        require(pendingUserMaxAmount == 0, "pendingUserMaxAmount != 0");
 
         if (_approved) {
             merkleRoot = pendingMerkleRoot;
-            userMaxAmount = pendingUserMaxAmount;
 
             increaseTotalAmount = pendingIncreaseTotalAmount;
             totalInfo.total += increaseTotalAmount;
             emit AddTotalAmount(merkleRoot, increaseTotalAmount);
-
+            // TODO: Why?
             lastTime = block.timestamp / 86400 * 86400;
         }
         delete pendingMerkleRoot;
     }
 
     // set the total amount of airdrop this period
+    // TODO: deprecated
     function setTotalAmount(uint256 totalAmount) public onlyOwner {
         require(totalAmount > totalInfo.total, "totalAmount is less than totalInfo.total");
         totalInfo.total = totalAmount;
@@ -175,25 +175,19 @@ contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
         return amount.sub(claimedUserMap[msg.sender].claimed);
     }
 
-    function claim(bytes32 merkleRoot2, uint256 index2, uint256 amount2, bytes32[] calldata merkleProof2,
-        bytes32 merkleRoot1, uint256 index1, uint256 amount1, bytes32[] calldata merkleProof1) external {
+    function claim(bytes32 root, uint256 amount, bytes32[] calldata merkleProof) external {
         require(0 < claimAvailable, "claim: the current status is not available.");
-        require(amount1 <= userMaxAmount, "claim: amount1 should be less than userMaxAmount.");
 
-        require(0 < merkleProof1.length, "claim: Invalid merkleProof1");
-        require(merkleRoot2 == merkleRoot, "claim: Invalid merkleRoot2");
-        require(!isUserClaimed(merkleRoot2), "claim: Drop already claimed.");
+        require(0 < merkleProof.length, "claim: Invalid merkleProof");
+        require(root == merkleRoot, "claim: Invalid merkleRoot");
+        require(!isUserClaimed(root), "claim: Drop already claimed.");
 
         // Verify the merkle proof1 with msg.sender.
-        bytes32 node1 = keccak256(abi.encodePacked(index1, msg.sender, amount1));
-        require(verify(merkleProof1, merkleRoot1, node1), "claim: Invalid proof1.");
-
-        // Verify the merkle proof with merkleRoot1.
-        bytes32 node2 = keccak256(abi.encodePacked(index2, merkleRoot1, amount2));
-        require(verify(merkleProof2, merkleRoot, node2), "claim: Invalid proof2.");
+        bytes32 leaf = keccak256(abi.encodePacked(msg.sender, amount));
+        require(MerkleProof.verify(merkleProof, root, leaf), "claim: Invalid proof1.");
 
         // get transfer amount
-        uint256 transferAmount = _getUserTransferAmount(amount1);
+        uint256 transferAmount = _getUserTransferAmount(amount);
         require(0 < transferAmount, "claim: transfer amount should be greater than 0.");
 
         // transfer to msg.sender
@@ -201,28 +195,8 @@ contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
 
         // set claimed amount
         _setTotalClaimed(transferAmount);
-        _setUserClaimed(amount1);
+        _setUserClaimed(amount);
 
-        emit Claimed(merkleRoot2, index1, msg.sender, transferAmount);
+        emit Claimed(root, msg.sender, transferAmount);
     }
-
-    function verify(bytes32[] memory proof, bytes32 root, bytes32 leaf) internal pure returns (bool) {
-        bytes32 computedHash = leaf;
-
-        for (uint256 i = 0; i < proof.length; i++) {
-            bytes32 proofElement = proof[i];
-
-            if (computedHash <= proofElement) {
-                // Hash(current computed hash + current element of the proof)
-                computedHash = keccak256(abi.encodePacked(computedHash, proofElement));
-            } else {
-                // Hash(current element of the proof + current computed hash)
-                computedHash = keccak256(abi.encodePacked(proofElement, computedHash));
-            }
-        }
-
-        // Check if the computed hash (root) is equal to the provided root
-        return computedHash == root;
-    }
-
 }

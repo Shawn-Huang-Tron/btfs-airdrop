@@ -184,7 +184,7 @@ contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
 
         // Verify the merkle proof1 with msg.sender.
         bytes32 leaf = keccak256(abi.encodePacked(msg.sender, amount));
-        require(MerkleProof.verify(merkleProof, root, leaf), "claim: Invalid proof1.");
+        require(MerkleProof.verify(merkleProof, root, leaf), "claim: Invalid proof.");
 
         // get transfer amount
         uint256 transferAmount = _getUserTransferAmount(amount);

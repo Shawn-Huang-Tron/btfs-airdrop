@@ -4,14 +4,18 @@ pragma solidity ^0.8.2;
 
 // Open Zeppelin libraries for controlling upgradability and access.
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+// import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
 // MerkleDistributor for airdrop to BTFS staker
-contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
+contract BtfsAirdrop is Initializable, UUPSUpgradeable, AccessControlUpgradeable {
     using SafeMath for uint256;
+
+    bytes32 public constant PROPOSAL = keccak256("PROPOSAL");
+    bytes32 public constant REVIEW = keccak256("REVIEW");
 
     bytes32 public merkleRoot;
     bytes32 public pendingMerkleRoot;
@@ -19,20 +23,12 @@ contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
     uint256 public pendingIncreaseTotalAmount;
     uint256 public lastTime;
 
-    // admin address which can propose adding a new merkle root
-    address public proposalAuthority;
-    // admin address which approves or rejects a proposed merkle root
-    address public reviewAuthority;
-    // admin address which can withdraw all contract balance
-    address public superAuthority;
-
     struct statistics {
         uint256 total;
         uint256 claimed;
     }
 
     statistics  public totalInfo;
-    // TODO: change the datastruct to a map
     struct claimedUser {
         bytes32 lastMerkleRoot;
         uint256 claimed;
@@ -46,12 +42,12 @@ contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
     event WithdrawAllBalance(address account, uint256 amount);
 
     // initialize
-    function initialize(address _proposalAuthority, address _reviewAuthority, address _superAuthor) public initializer {
-        proposalAuthority = _proposalAuthority;
-        reviewAuthority = _reviewAuthority;
-        superAuthority = _superAuthor;
-        __Ownable_init();
+    function initialize(address _proposalAuthority, address _reviewAuthority) public initializer {
         __UUPSUpgradeable_init();
+        __AccessControl_init();
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(PROPOSAL, _proposalAuthority);
+        _grantRole(REVIEW, _reviewAuthority);
     }
 
     function getImplementation() external view returns (address) {
@@ -59,40 +55,29 @@ contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
     }
     
     ///@dev required by the OZ UUPS module
-    function _authorizeUpgrade(address) internal override onlyOwner {}
+    function _authorizeUpgrade(address) internal override onlyRole(DEFAULT_ADMIN_ROLE) {}
 
     // receive()
     receive() external payable {}
 
+    function setProposalAuthority(address _account) public onlyRole(DEFAULT_ADMIN_ROLE){
+        _grantRole(PROPOSAL, _account);
+    }
 
-    function setProposalAuthority(address _account) public {
-        require(msg.sender == proposalAuthority, "you can not set proposal authority.");
-        proposalAuthority = _account;
-    }
-    function setReviewAuthority(address _account) public {
-        require(msg.sender == reviewAuthority, "you can not set review authority.");
-        reviewAuthority = _account;
-    }
-    function setSuperAuthority(address _account) public {
-        require(msg.sender == superAuthority, "you can not set super authority.");
-        superAuthority = _account;
+    function setReviewAuthority(address _account) public onlyRole(DEFAULT_ADMIN_ROLE){
+        _grantRole(REVIEW, _account);
     }
 
     // super authority withdraw all balance.
-    // TODO: 大额资金建议加上时间延迟函数
-    function withdrawAllBalance() external {
-        require(msg.sender == superAuthority, "withdrawAmount: you are not super authority.");
+    function withdrawAllBalance() external onlyRole(DEFAULT_ADMIN_ROLE){
         payable(msg.sender).transfer(address(this).balance);
-
         emit WithdrawAllBalance(msg.sender, address(this).balance);
     }
 
-    function setClaimAvailable() public {
-        require(msg.sender == reviewAuthority, "you can not set claim available.");
+    function setClaimAvailable() public onlyRole(REVIEW){
         claimAvailable = 1;
     }
-    function setClaimNotAvailable() public {
-        require(msg.sender == reviewAuthority, "you can not set claim available.");
+    function setClaimNotAvailable() public onlyRole(REVIEW){
         claimAvailable = 0;
     }
     function getClaimAvailable() view public returns(uint8) {
@@ -100,8 +85,7 @@ contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
     }
 
     // every day, the proposal authority calls to submit the merkle root for a new airdrop.
-    function proposeMerkleRoot(bytes32 _merkleRoot, uint256 _increaseTotalAmount) public {
-        require(msg.sender == proposalAuthority, "proposeMerkleRoot: msg.sender != proposalAuthority");
+    function proposeMerkleRoot(bytes32 _merkleRoot, uint256 _increaseTotalAmount) public onlyRole(PROPOSAL){
         require(_merkleRoot != 0x00, "proposeMerkleRoot: _merkleRoot == 0x00");
         require(pendingMerkleRoot == 0x00, "proposeMerkleRoot: pendingMerkleRoot != 0x00");
         require(_merkleRoot != merkleRoot, "proposeMerkleRoot: merkleRoot is already used.");
@@ -115,8 +99,7 @@ contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
     // After validating the correctness of the pending merkle root, the reviewing authority
     // calls to confirm it and the distribution may begin.
     // 这个 reviewPendingMerkleRoot 只是为了多一道审核？那审核人具体能怎么审核呢？
-    function reviewPendingMerkleRoot(bool _approved) public {
-        require(msg.sender == reviewAuthority, "msg.sender != reviewAuthority");
+    function reviewPendingMerkleRoot(bool _approved) public onlyRole(REVIEW){
         require(pendingMerkleRoot != 0x00, "pendingMerkleRoot != 0x00");
 
         if (_approved) {
@@ -125,18 +108,15 @@ contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
             increaseTotalAmount = pendingIncreaseTotalAmount;
             totalInfo.total += increaseTotalAmount;
             emit AddTotalAmount(merkleRoot, increaseTotalAmount);
-            // TODO: Why?
             lastTime = block.timestamp / 86400 * 86400;
         }
         delete pendingMerkleRoot;
     }
 
     // set the total amount of airdrop this period
-    // TODO: deprecated
-    function setTotalAmount(uint256 totalAmount) public onlyOwner {
+    function setTotalAmount(uint256 totalAmount) public onlyRole(DEFAULT_ADMIN_ROLE) {
         require(totalAmount > totalInfo.total, "totalAmount is less than totalInfo.total");
         totalInfo.total = totalAmount;
-
         emit SetTotalAmount(merkleRoot, totalAmount);
     }
 
@@ -175,6 +155,8 @@ contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
         return amount.sub(claimedUserMap[msg.sender].claimed);
     }
 
+    // TODO: DB算出来的可能和这里有不一致
+    // TODO: 后台计算被攻击篡改导致默克尔根被包含的时候如何处理，即amount能通过默克尔校验，但是在那之前被篡改了
     function claim(bytes32 root, uint256 amount, bytes32[] calldata merkleProof) external {
         require(0 < claimAvailable, "claim: the current status is not available.");
 
@@ -182,7 +164,7 @@ contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
         require(root == merkleRoot, "claim: Invalid merkleRoot");
         require(!isUserClaimed(root), "claim: Drop already claimed.");
 
-        // Verify the merkle proof1 with msg.sender.
+        // Verify the merkle proof with msg.sender.
         bytes32 leaf = keccak256(abi.encodePacked(msg.sender, amount));
         require(MerkleProof.verify(merkleProof, root, leaf), "claim: Invalid proof.");
 
@@ -190,12 +172,12 @@ contract BtfsAirdrop is Initializable, UUPSUpgradeable, OwnableUpgradeable {
         uint256 transferAmount = _getUserTransferAmount(amount);
         require(0 < transferAmount, "claim: transfer amount should be greater than 0.");
 
-        // transfer to msg.sender
-        payable(msg.sender).transfer(transferAmount);
-
         // set claimed amount
         _setTotalClaimed(transferAmount);
         _setUserClaimed(amount);
+        
+        // transfer to msg.sender
+        payable(msg.sender).transfer(transferAmount);
 
         emit Claimed(root, msg.sender, transferAmount);
     }
